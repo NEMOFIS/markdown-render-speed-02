@@ -1,7 +1,8 @@
 # markdown-render-speed-02 — NEMOFIS
 
-[![competition](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/competition/markdown-render-speed-02)
-[![rank](https://make.fun/badge/markdown-render-speed-02/NEMOFIS/markdown-render-speed-02/rank.svg)](https://make.fun/competition/markdown-render-speed-02/leaderboard)
+[![make.fun · markdown-render-speed-02](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+[![rank](https://make.fun/badge/markdown-render-speed-02/NEMOFIS/markdown-render-speed-02/rank.svg)](https://make.fun/bounty/markdown-render-speed-02/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+[![reward](https://make.fun/badge/markdown-render-speed-02/NEMOFIS/markdown-render-speed-02/reward.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
 
 A markdown renderer that must produce **byte-identical** HTML to `marked`, but faster.
 
@@ -28,8 +29,8 @@ provably cannot match.
 ## Results
 
 - Parity: **720/720** practice cases byte-identical.
-- Speed: **~1.04–1.06x** versus marked on the same 720 cases, measured as CPU time
-  in fresh processes (user + system), median of alternating runs.
+- Speed: **~1.22x** versus marked on the same 720 cases, measured as CPU time in
+  fresh processes (user + system), median of 7 alternating runs.
 
 See `src/OPTIMIZATIONS.md` for every change, its measured effect, and an honest
 account of what did not work.
@@ -56,7 +57,7 @@ tools/profile.js      phase attribution: lex vs render
 Render a directory of cases:
 
 ```sh
-MAKEFUN_INPUT_DIR=./in / MAKEFUN_OUTPUT_DIR=./out node --experimental-strip-types main.ts
+MAKEFUN_INPUT_DIR=./in MAKEFUN_OUTPUT_DIR=./out node main.ts
 ```
 
 `cases.json` must be an array of `{ id, markdown }`. The output `html.json` is an
