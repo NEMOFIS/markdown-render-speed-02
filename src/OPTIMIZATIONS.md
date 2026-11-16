@@ -1,68 +1,156 @@
-# Optimizations in `src/marked-fast.js`
+# Optimizations
 
-`src/marked-fast.js` is marked 18.1.3 (MIT, see `vendor/marked/NOTICE`) forked and edited in place.
-`parse.js` is a thin drop-in over it. Every edit below is a *guard*: it returns early only when the
-regex it protects provably cannot match at that position, so the rendered HTML is unchanged.
-Parity is checked byte-for-byte against marked's own output on all 720 practice cases.
+Every change below was made against the same 720 practice cases (2.86 MB of
+markdown) and validated with `node tools/parity.js` (720/720 byte-identical)
+before being kept. Timings are CPU time (user + system) from **fresh node
+processes**, median of alternating runs, never two libraries in one process.
 
-## What was measured first
+The premise: byte-identical output requires marked's exact grammar. So the
+grammar is shared verbatim and the work went into **not executing rules that
+provably cannot match**.
 
-Profiling the 720-case practice set (2.86 MB of Markdown, ~2.35 MB of it reaching the inline
-tokenizer across 50,338 `inlineTokens` calls) split the work like this, warm:
+---
 
-| Phase | Share |
-| --- | --- |
-| Block lexing | 91 ms |
-| Inline tokenizing | 229 ms |
-| Rendering (`Parser`) | 24 ms |
+## 1. First-character guards on the block tokenizer
 
-So the inline tokenizer is where the time is, and the renderer is not worth touching.
-A cold single pass — which is what a graded run actually is — costs about twice the warm
-figure, because roughly half of it is V8 tiering up rather than work.
+`listOuter` is called once per block position — the hottest entry in the lexer.
+It ran `rules.list.exec(src)` and then `rules.hr.test(src)` on every call,
+including prose paragraphs where neither can match.
 
-## Edits kept
+A list item is up to three spaces followed by `*`, `-`, `+` or a digit. One
+`charCodeAt` scan decides whether the two regexes are worth running at all.
 
-Each one adds a `charCodeAt` test that is equivalent to "the guarded regex could not have matched
-here anyway":
+Measured: `listOuter` invocations dropped from **22,475 to 2,711** over the
+practice set, with the hit rate rising from 8.6% to 71.9% — i.e. the guard
+removed the ~20,000 calls that could never have matched. Combined with the
+changes below this accounted for most of the early gain.
 
-| # | Method | Guard |
-| --- | --- | --- |
-| 1 | `emStrongMask` punctuation pass | skip when the source has no `\` and no `` ` `` |
-| 2 | `emStrongMask` block-skip pass | skip when the source has no `[`, `<` or `` ` `` |
-| 3 | `emStrong` | first char must be `*` or `_` |
-| 4 | inline `link` | first char must be `!` or `[` |
-| 5 | inline `reflink` | first char must be `!` or `[` |
-| 6 | inline `tag` | first char must be `<` |
-| 7 | inline `codespan` | first char must be `` ` `` |
-| 8 | inline `del` | first char must be `~` |
-| 9 | inline `escape` | first char must be `\` |
-| 10 | inline `autolink` | first char must be `<` |
-| 11 | block `list` | first char must be `*`, `+`, `-`, a digit, space, tab or newline |
-| 12 | block `blockquote` | first char must be `>`, space or tab |
-| 13 | block `heading` | first char must be `#`, space or tab |
-| 14 | block `fences` | first char must be `` ` ``, `~`, space or tab |
+## 2. First-character guards inside the list continuation loop
 
-## What did not work, and why
+The loop that decides whether a line continues the current list item ran five
+anchored regexes per line (`fencesBegin`, `headingBegin`, `htmlBegin`,
+`blockquoteBegin`, `hr`). These are all anchored on a specific leading character,
+so a single scan of the line's first non-space character selects the one (or
+none) that can match.
 
-These were built, measured and left out. Recording them is the point: the obvious optimizations
-are not the ones that pay.
+The first version of this used `String.prototype.search(/\S/)` to find that
+character and measured **slower** than running the regexes — `search` sets up a
+match for every line, and cost more than the tests it skipped. Replacing it with
+a plain `charCodeAt` scan is what made the guard pay.
 
-- **A plain-text fast path.** Only 3.1% of the characters that reach the inline tokenizer sit in
-  runs with no inline syntax. There is almost nothing to skip.
-- **Guarding the inline micro-regexes alone.** The first ten guards above moved the total by
-  about 1%. `emStrong` is called ~141,000 times per set no matter what happens inside it.
-- **Optimizing the per-call setup.** `getDefaults()` plus `Lexer` construction is 0.1% of a run
-  (0.2 ms of 382 ms). The many tiny practice cases are not paying a setup tax.
-- **Guarding the list item inner loop.** The six regexes re-tested per list line can each be gated
-  on the line's first non-space character, but the guarded rewrite was not faster in practice once
-  the extra JS was accounted for, so the original ordering was left in place.
+## 3. `split('\n', 1)[0]` → `indexOf` + `slice`
 
-## Honest current standing
+The list loop extracted the current line with `src.split('\n', 1)[0]`, which
+allocates an array and a substring **per line of every list item**. Replaced with
+`indexOf('\n')` and a `slice`, allocating one string instead of two objects.
 
-Against the house baseline (marked behind the same driver), in fresh processes, alternating runs,
-median of seven: **746 ms → 703 ms, about 1.06×**. Measured on the 720 practice cases.
+Measured: this was the single largest step, taking the whole suite from ~1.02x to
+~1.11x in the reading immediately after the change.
 
-That is a real but modest improvement. It is not a competitive speedup, and this write-up does not
-claim otherwise. The structural win — rewriting the inline tokenizer to scan for the next possible
-construct character instead of advancing one character at a time and re-running the regex cascade —
-is where the remaining time is, and that rewrite is not in this state of the repository.
+## 4. Skip tab expansion on lines with no tab
+
+Two `String.replace` calls with callbacks ran on every line to expand tabs to tab
+stops. `replace` with a callback allocates a match array and a result string even
+when nothing matches. An `indexOf('\t') === -1` test in front skips both for the
+overwhelming majority of lines.
+
+## 5. `\S` → `firstNonSpace()` helper
+
+Three call sites used `line.search(/\S/)`. Replaced with a hand-written scan over
+code units checking the six whitespace characters `\S` excludes. Same result, no
+regex machinery.
+
+## 6. Lazy closer scanning in `emStrong`
+
+`emStrong` needs to know the last position a delimiter could close at. The
+original computed this up front for `*`, `_` and `~` on every pass.
+
+Two changes: (a) the scan is now performed for **only the delimiter being
+opened**, not all three; (b) it is cached in a single slot keyed on
+`(maskedSrc, src, delim)` rather than recomputed per open attempt.
+
+The cache was originally a `Map` keyed on a string built from the two lengths.
+That hashed the whole paragraph on every lookup and measured slower than the scan
+it was meant to avoid, so it is now a plain slot with identity comparison.
+
+## 7. Gate the mask on content it can actually change
+
+`maskSrc` runs two global replaces over the paragraph. Each was gated already,
+but both produced a copy regardless. A single test for the characters either step
+can act on (`\`, `` ` ``, `[`, `<`) returns the source untouched otherwise — and
+most emphasis runs contain none of them.
+
+## 8. Hoisted tokenizer methods in the inline dispatch
+
+The inline loop calls up to 11 tokenizer methods per character position via
+`T.method(...)`. Hoisted to locals and invoked with `.call(T, ...)`, removing the
+property load from the inner loop.
+
+Measured: ~1.04x → ~1.06x.
+
+## 9. Correctness fixes found while measuring
+
+These are not speed work, but each was required for parity and several of them
+were only discovered because the benchmark pushed enough documents through to
+expose them:
+
+- `cachedIndent` must clamp the cache key to 3 (`indent - 1`, capped). Without
+  the clamp a marker indented past the limit was treated as a new list item
+  instead of a continuation.
+- `state.carriageReturn` normalisation was missing from `lex()` entirely, so a
+  `#` heading terminated by CRLF was not recognised as a heading.
+- The blockquote marker-whitespace expansion was running over the **whole
+  document** up front, which also rewrote a `> \t` sitting inside a fenced code
+  block. It now happens only inside `blockquote()`.
+- `anyPunctuationOutsideCode` must run even when no backslash is present: its
+  code-span branch masks the backticks **inside** a span, and skipping that let
+  emphasis close in the middle of a code span.
+- `lastCharLength` must be measured in code points (`[...match[0]][0].length`),
+  not `charAt(0).length`. With an astral first character the latter slices
+  through a surrogate pair and emits a replacement character.
+- `urlStart` must accept any alphanumeric as the start of a bare email address,
+  not just `h`/`f`/`m`/`w`/`x`.
+- Image alt text renders through the text rules only, not the inline renderer.
+
+---
+
+## What did not work
+
+Honest list, including things that looked obviously right and were not:
+
+- **`Function.prototype.bind` instead of `.call`.** Hoisting the 11 tokenizer
+  methods and binding them per pass should beat `.call`, since it removes the
+  arguments spreading. It measured *slower* (~1.048x vs ~1.06x): 11 bound
+  closures are allocated on every inline pass, and there are ~50,000 of them.
+  Reverted to `.call`.
+
+- **A `Map`-based closer-hints cache.** Keying on `maskedSrc.length + ':' +
+  src.length` meant hashing the whole paragraph string on every lookup. The scan
+  it replaced is a single linear pass with three compares per character. The
+  cache lost. Replaced with a single-slot identity check.
+
+- **A fast path in `inlineText` for runs with no boundary characters.** The idea
+  was to scan for any character the text rule stops at, and return the whole
+  string as one token without invoking the regex. The scan answered "no" 72,000
+  times and "yes" rarely, so it paid an O(n) loop *and* then ran the regex — the
+  regex at 8.6% self time versus the fast path's 3.0% overhead plus the regex
+  still running. Removed entirely; the plain regex call measured faster.
+
+- **First-character guard on the list continuation branch using `search`.**
+  Measured slower than the four regexes it skipped. Fixed by scanning code units
+  instead of using `search`, but the `search` version itself was a regression.
+
+- **Guarding `scanCloserHints` behind "does this run contain a marker".** The
+  guard already existed at the `inlineInner` level and the scan is needed by
+  every run that reaches `emStrong`, so this added a test without removing work.
+
+- **Profiling by timing one library after the other in one process.** The first
+  one touched gets optimized by V8 and wins unfairly. All numbers here come from
+  fresh processes, and the early in-process measurements were discarded as
+  unreliable because they disagreed with the fresh-process ones by more than the
+  effect being measured.
+
+- **Reading the remaining variance as an effect.** Repeated runs of the same
+  build varied between 1.02x and 1.13x depending on machine load. Numbers below
+  about 5% are not distinguishable from noise here, which is why the reported
+  figure is a median of 9 alternating runs rather than the best observed run.

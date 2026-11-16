@@ -1,3 +1,13 @@
 {
-  "type": "module"
+  "name": "makefun-markdown-render-speed-02",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Byte-identical markdown renderer for make.fun competition markdown-render-speed-02",
+  "main": "parse.js",
+  "scripts": {
+    "start": "node main.ts",
+    "parity": "node tools/parity.js",
+    "bench": "node tools/bench.js"
+  }
 }
